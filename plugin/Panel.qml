@@ -3,7 +3,7 @@ import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
 import qs.Commons
-import qs.Ui
+import qs.Ui as Ui
 
 // Mobile hotspot panel (io.github.shivamnarkar47.omarchy-hotspot), modeled on omarchy.network:
 // a bar button that opens a keyboard-navigable popup with a hero toggle,
@@ -12,7 +12,7 @@ import qs.Ui
 // omarchy-hotspot-helper, so the station connection stays up the whole
 // time. QR payload: WIFI:T:WPA;S:OmarchyHotspot;P:<password>;; rendered
 // from the same 0/1 matrix format as omarchy.wifiqr.
-Panel {
+Ui.Panel {
   id: root
   moduleName: "io.github.shivamnarkar47.omarchy-hotspot"
   ipcTarget: "io.github.shivamnarkar47.omarchy-hotspot"
@@ -44,6 +44,13 @@ Panel {
   property bool passwordBusy: false
   property string passwordError: ""
   property string pendingPassword: ""
+
+  // Frequency band / channel settings.
+  property string freqBand: "auto"
+  property string channel: "0"
+  property var channelOptions: []
+  property bool freqBandBusy: false
+  property bool channelBusy: false
 
   property var qrRows: []
   property int qrSize: 0
@@ -106,8 +113,9 @@ Panel {
       hotspotState = "on"
       if (parts[1] && !root.editingSsid) hotspotSsid = parts[1]
       hotspotUplink = parts[2] || ""
-      hotspotChannel = parts[3] || ""
-      hotspotClients = parts[4] || ""
+      if (!root.freqBandBusy) freqBand = parts[3] || "auto"
+      hotspotChannel = parts[4] || ""
+      hotspotClients = parts[5] || ""
       if (qrSize === 0 && !qrProc.running) Qt.callLater(generateQr)
       // Pull the passphrase straight from the user-owned secret file rather
       // than from the status channel.
@@ -148,6 +156,16 @@ Panel {
     qrRows = lines
     qrSize = size
     qrLoading = false
+  }
+
+  function applyChannels(raw) {
+    var lines = String(raw || "").trim().split(/\r?\n/).filter(function(l) { return l !== "" })
+    var opts = [{ value: "0", label: "Auto (follow Wi-Fi)" }]
+    for (var i = 0; i < lines.length; i++) {
+      var ch = lines[i].trim()
+      if (ch !== "") opts.push({ value: ch, label: "ch " + ch })
+    }
+    channelOptions = opts
   }
 
   function copyPassword() {
@@ -219,6 +237,35 @@ Panel {
     ssidProc.command = ["bash", "-c", "pkexec " + root.helper + " set-ssid"]
     ssidProc.running = true
   }
+
+  function loadAvailableChannels() {
+    if (listChannelsProc.running) return
+    listChannelsProc.command = ["bash", "-c", "pkexec " + root.helper + " list-channels"]
+    listChannelsProc.running = true
+  }
+
+  function updateFreqBand(value) {
+    if (freqBandBusy) return
+    var v = String(value).toLowerCase()
+    if (v === root.freqBand) return
+    freqBandBusy = true
+    pendingFreqBand = v
+    freqBandProc.command = ["bash", "-c", "pkexec " + root.helper + " set-freq-band"]
+    freqBandProc.running = true
+  }
+
+  function updateChannel(value) {
+    if (channelBusy) return
+    var v = String(value).toLowerCase()
+    if (v === root.channel) return
+    channelBusy = true
+    pendingChannel = v
+    channelProc.command = ["bash", "-c", "pkexec " + root.helper + " set-channel"]
+    channelProc.running = true
+  }
+
+  property string pendingFreqBand: ""
+  property string pendingChannel: ""
 
   function statusLine() {
     if (isOn) {
@@ -351,6 +398,52 @@ Panel {
     }
   }
 
+  Process {
+    id: listChannelsProc
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.applyChannels(text) }
+  }
+
+  Process {
+    id: freqBandProc
+    stdinEnabled: true
+    stdout: StdioCollector { id: freqBandOut; waitForEnd: true }
+    stderr: StdioCollector { id: freqBandErr; waitForEnd: true }
+    onStarted: function() {
+      freqBandProc.write(root.pendingFreqBand + "\n")
+    }
+    onExited: function(code) {
+      freqBandBusy = false
+      if (code !== 0) {
+        root.lastError = String(freqBandErr.text || freqBandOut.text || "").replace(/\s+/g, " ").trim().slice(0, 120) || ("exit " + code)
+        return
+      }
+      root.freqBand = root.pendingFreqBand
+      loadAvailableChannels()
+      root.refresh()
+      if (root.isOn) root.generateQr()
+    }
+  }
+
+  Process {
+    id: channelProc
+    stdinEnabled: true
+    stdout: StdioCollector { id: channelOut; waitForEnd: true }
+    stderr: StdioCollector { id: channelErr; waitForEnd: true }
+    onStarted: function() {
+      channelProc.write(root.pendingChannel + "\n")
+    }
+    onExited: function(code) {
+      channelBusy = false
+      if (code !== 0) {
+        root.lastError = String(channelErr.text || channelOut.text || "").replace(/\s+/g, " ").trim().slice(0, 120) || ("exit " + code)
+        return
+      }
+      root.channel = root.pendingChannel
+      root.refresh()
+      if (root.isOn) root.generateQr()
+    }
+  }
+
   Timer {
     id: copyFlashTimer
     interval: 1200
@@ -369,6 +462,7 @@ Panel {
   onOpenedChanged: {
     if (opened) {
       refresh()
+      loadAvailableChannels()
       if (isOn) generateQr()
       cursorActive = false
       focusSection = "hero"
@@ -381,7 +475,7 @@ Panel {
   }
 
   // ---- Bar button -------------------------------------------------------
-  BarIconButton {
+  Ui.BarIconButton {
     id: button
     anchors.fill: parent
     bar: root.bar
@@ -399,7 +493,7 @@ Panel {
   }
 
   // ---- Popup ------------------------------------------------------------
-  KeyboardPanel {
+  Ui.KeyboardPanel {
     id: panel
     anchorItem: button
     owner: root
@@ -409,7 +503,7 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(380))
     contentHeight: panel.fittedContentHeight(column.implicitHeight)
 
-    PanelKeyCatcher {
+    Ui.PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
       blocked: root.editingPassword || root.passwordBusy
@@ -453,7 +547,7 @@ Panel {
           anchors.right: parent.right
           anchors.verticalCenter: parent.verticalCenter
 
-          ToggleSwitch {
+          Ui.ToggleSwitch {
             id: powerSwitch
             checked: root.isOn
             busy: root.isBusy
@@ -463,7 +557,7 @@ Panel {
             onHovered: function(on) { if (on) root.setSection("hero") }
             onToggled: root.toggle()
 
-            PanelToolTip {
+            Ui.PanelToolTip {
               visible: powerSwitch.containsMouse
               text: root.isOn ? "Turn hotspot off" : "Turn hotspot on"
               fontFamily: root.fontFamily
@@ -556,7 +650,7 @@ Panel {
       }
 
       // ---------- QR card (only while broadcasting) ----------
-      PanelSeparator {
+      Ui.PanelSeparator {
         visible: root.isOn
         foreground: root.foreground
       }
@@ -570,7 +664,7 @@ Panel {
           width: parent.width
           implicitHeight: Math.max(qrTitle.implicitHeight, qrRefreshRow.implicitHeight)
 
-          PanelSectionHeader {
+          Ui.PanelSectionHeader {
             id: qrTitle
             text: "SCAN TO JOIN"
             foreground: root.foreground
@@ -585,7 +679,7 @@ Panel {
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(6)
 
-            PanelActionButton {
+            Ui.PanelActionButton {
               iconText: "󰐲"
               tooltipText: "Regenerate QR"
               foreground: root.foreground
@@ -659,7 +753,7 @@ Panel {
               font.bold: true
             }
 
-            PanelActionButton {
+            Ui.PanelActionButton {
               iconText: "󰏫"
               tooltipText: "Edit name"
               foreground: root.foreground
@@ -686,7 +780,7 @@ Panel {
               font.pixelSize: Style.font.bodySmall
             }
 
-            PanelActionButton {
+            Ui.PanelActionButton {
               iconText: "󰏫"
               tooltipText: "Edit password"
               foreground: root.foreground
@@ -696,7 +790,7 @@ Panel {
               onClicked: root.startPasswordEdit()
             }
 
-            PanelActionButton {
+            Ui.PanelActionButton {
               iconText: root.copyFlash ? "" : ""
               tooltipText: "Copy password"
               foreground: root.foreground
@@ -714,7 +808,7 @@ Panel {
           anchors.horizontalCenter: parent.horizontalCenter
           spacing: Style.space(6)
 
-          TextField {
+          Ui.TextField {
             id: qrSsidField
             width: Style.space(140)
             text: root.ssidDraft
@@ -729,7 +823,7 @@ Panel {
             Keys.onEscapePressed: root.cancelSsidEdit()
           }
 
-          PanelActionButton {
+          Ui.PanelActionButton {
             iconText: ""
             tooltipText: "Save name"
             foreground: root.foreground
@@ -737,7 +831,7 @@ Panel {
             onClicked: root.saveSsid()
           }
 
-          PanelActionButton {
+          Ui.PanelActionButton {
             iconText: "󰜺"
             tooltipText: "Cancel"
             foreground: root.foreground
@@ -752,7 +846,7 @@ Panel {
           anchors.horizontalCenter: parent.horizontalCenter
           spacing: Style.space(6)
 
-          TextField {
+          Ui.TextField {
             id: passwordField
             width: Style.space(140)
             text: root.passwordDraft
@@ -767,7 +861,7 @@ Panel {
             Keys.onEscapePressed: root.cancelPasswordEdit()
           }
 
-          PanelActionButton {
+          Ui.PanelActionButton {
             iconText: ""
             tooltipText: "Save password"
             foreground: root.foreground
@@ -775,7 +869,7 @@ Panel {
             onClicked: root.savePassword()
           }
 
-          PanelActionButton {
+          Ui.PanelActionButton {
             iconText: "󰜺"
             tooltipText: "Cancel"
             foreground: root.foreground
@@ -806,7 +900,7 @@ Panel {
       }
 
       // ---------- Details ----------
-      PanelSeparator {
+      Ui.PanelSeparator {
         foreground: root.foreground
       }
 
@@ -825,6 +919,9 @@ Panel {
         InfoLabel { text: "Channel" }
         DetailValue { text: root.hotspotChannel ? ("ch " + root.hotspotChannel) : "—" }
 
+        InfoLabel { text: "Band" }
+        DetailValue { text: root.freqBand === "auto" ? "Auto" : (root.freqBand === "5" || root.freqBand === "5ghz" ? "5 GHz" : "2.4 GHz") }
+
         InfoLabel { text: "Clients" }
         DetailValue { text: root.isOn ? (root.hotspotClients || "0") : "—" }
 
@@ -834,11 +931,48 @@ Panel {
 
       Text {
         width: parent.width
-        text: root.isOn ? "Your Wi-Fi connection stays on while the hotspot is active." : "Start the hotspot to share this connection — your Wi-Fi stays on."
+        text: root.isOn
+          ? "Hotspot follows your Wi-Fi changes automatically — no need to restart it."
+          : "Start the hotspot to share this connection — your Wi-Fi stays on and changes are followed automatically."
         color: Qt.darker(root.foreground, 1.5)
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
         wrapMode: Text.Wrap
+      }
+
+      // ---------- Radio settings ----------
+      Ui.PanelSeparator {
+        foreground: root.foreground
+      }
+
+      Ui.PanelSectionHeader {
+        text: "RADIO"
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+      }
+
+      Ui.Dropdown {
+        width: parent.width
+        label: "Frequency Band"
+        fontFamily: root.fontFamily
+        options: [
+          { value: "auto", label: "Auto (mirror station)" },
+          { value: "2.4",  label: "2.4 GHz" },
+          { value: "5",    label: "5 GHz" }
+        ]
+        value: root.freqBand
+        onHovered: function(h) { if (h) root.setSection("actions", 0) }
+        onChanged: function(v) { root.updateFreqBand(v) }
+      }
+
+      Ui.Dropdown {
+        width: parent.width
+        label: "Channel"
+        fontFamily: root.fontFamily
+        options: root.channelOptions.length > 0 ? root.channelOptions : [{ value: "0", label: "Auto" }]
+        value: root.channel
+        onHovered: function(h) { if (h) root.setSection("actions", 0) }
+        onChanged: function(v) { root.updateChannel(v) }
       }
     }
   }
